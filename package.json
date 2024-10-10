@@ -1,0 +1,29 @@
+{
+  "name": "send-to-kafka",
+  "version": "1.0.0",
+  "description": "send to kafka lambda",
+  "main": "index.js",
+  "scripts": {
+    "orchestratePTParam:run": "node dt-main/orchestrate-pt-parameters/index.js",
+    "removePTReservation:run": "node dt-main/remove-pt-reservation/index.js",
+    "sendToKafka:run": "node dt-main/send-to-kafka/index.js",
+    "test": "jest --detectOpenHandles"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@jm18457/kafkajs-msk-iam-authentication-mechanism": "^2.0.3",
+    "@kafkajs/confluent-schema-registry": "^3.3.0",
+    "ajv": "^8.11.2",
+    "ajv-errors": "^3.0.0",
+    "aws-sdk": "^2.1257.0",
+    "csv-parse": "^5.5.3",
+    "dotenv": "^16.0.3",
+    "jest": "^29.3.1",
+    "kafkajs": "2.2.3",
+    "moment-timezone": "^0.5.44",
+    "mysql2": "^2.3.3",
+    "sequelize": "^6.25.6",
+    "sqlite3": "^5.1.2"
+  }
+}
