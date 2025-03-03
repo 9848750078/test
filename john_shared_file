@@ -1,0 +1,160 @@
+import json
+import boto3
+import os
+import requests
+import base64
+import logging
+ 
+# Set up logging
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+ 
+# Initialize AWS clients
+stepfunctions = boto3.client('stepfunctions')
+ssm = boto3.client('ssm')
+ 
+# Get configuration from environment variables or SSM Parameter Store
+STEP_FUNCTION_ARN = os.environ.get('STEP_FUNCTION_ARN')
+SERVICENOW_INSTANCE = os.environ.get('SERVICENOW_INSTANCE')
+SERVICENOW_API_PATH = os.environ.get('SERVICENOW_API_PATH', '/api/now/table/incident')
+ 
+def get_servicenow_credentials():
+    """Retrieve ServiceNow credentials from AWS SSM Parameter Store"""
+    username = ssm.get_parameter(
+        Name='/servicenow/username',
+        WithDecryption=True
+    )['Parameter']['Value']
+    
+    password = ssm.get_parameter(
+        Name='/servicenow/password',
+        WithDecryption=True
+    )['Parameter']['Value']
+    
+    return username, password
+ 
+def get_ticket_details(ticket_id, username, password):
+    """Retrieve ticket details from ServiceNow"""
+    url = f"https://{SERVICENOW_INSTANCE}{SERVICENOW_API_PATH}/{ticket_id}"
+    
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    
+    response = requests.get(
+        url, 
+        auth=(username, password),
+        headers=headers
+    )
+    
+    if response.status_code != 200:
+        logger.error(f"Failed to get ticket details: {response.status_code} - {response.text}")
+        raise Exception(f"ServiceNow API call failed with status code {response.status_code}")
+        
+    return response.json()['result']
+ 
+def extract_lf_tag_requirements(ticket_details):
+    """
+    Extract LF-tag requirements from ticket details
+    Customize this function based on your ServiceNow ticket structure
+    """
+    # Example extraction - modify according to your ticket format
+    requirements = {}
+    
+    # Extract from description field - assuming description contains structured data
+    description = ticket_details.get('description', '')
+    
+    # Parse description for LF tag information
+    # This is a simple example - adapt to your actual format
+    if 'Database:' in description:
+        requirements['database'] = description.split('Database:')[1].split('\n')[0].strip()
+    
+    if 'Table:' in description:
+        requirements['table'] = description.split('Table:')[1].split('\n')[0].strip()
+    
+    if 'Tags:' in description:
+        tags_section = description.split('Tags:')[1].split('\n')[0].strip()
+        tag_pairs = tags_section.split(',')
+        tags = {}
+        for pair in tag_pairs:
+            if ':' in pair:
+                key, value = pair.split(':')
+                tags[key.strip()] = value.strip()
+        requirements['tags'] = tags
+    
+    # Additional fields from the ticket
+    requirements['priority'] = ticket_details.get('priority')
+    requirements['requested_by'] = ticket_details.get('sys_created_by')
+    requirements['ticket_number'] = ticket_details.get('number')
+    
+    return requirements
+ 
+def lambda_handler(event, context):
+    """AWS Lambda handler function for the webhook"""
+    try:
+        logger.info(f"Received event: {json.dumps(event)}")
+        
+        # Parse the incoming webhook payload
+        if 'body' in event:
+            # Handle API Gateway event format
+            if isinstance(event['body'], str):
+                body = json.loads(event['body'])
+            else:
+                body = event['body']
+        else:
+            # Direct invocation
+            body = event
+            
+        # Extract ticket ID from the payload
+        ticket_id = body.get('ticket_id')
+        if not ticket_id:
+            logger.error("No ticket_id found in the request")
+            return {
+                'statusCode': 400,
+                'body': json.dumps({'error': 'ticket_id is required'})
+            }
+            
+        # Get ServiceNow credentials
+        username, password = get_servicenow_credentials()
+        
+        # Get ticket details from ServiceNow
+        ticket_details = get_ticket_details(ticket_id, username, password)
+        
+        # Extract LF tag requirements
+        lf_tag_requirements = extract_lf_tag_requirements(ticket_details)
+        
+        # Start Step Function execution
+        response = stepfunctions.start_execution(
+            stateMachineArn=STEP_FUNCTION_ARN,
+            input=json.dumps({
+                'ticket_id': ticket_id,
+                'lf_tag_requirements': lf_tag_requirements,
+                'servicenow_details': {
+                    'instance': SERVICENOW_INSTANCE,
+                    'ticket_url': f"https://{SERVICENOW_INSTANCE}/nav_to.do?uri=incident.do?sys_id={ticket_id}"
+                }
+            })
+        )
+        
+        logger.info(f"Step Function execution started: {response['executionArn']}")
+        
+        return {
+            'statusCode': 200,
+            'body': json.dumps({
+                'message': 'Process initiated successfully',
+                'executionArn': response['executionArn'],
+                'ticket_id': ticket_id
+            })
+        }
+        
+    except Exception as e:
+        logger.error(f"Error processing webhook: {str(e)}")
+        return {
+            'statusCode': 500,
+            'body': json.dumps({
+                'error': str(e)
+            })
+        }
+logger.info - logger Resources and Information.
+logger.info is your first and best source for all of the information you’re looking for. From general topics to more of what you would expect to find here, logger.info has it all. We hope you find ...
+ 
