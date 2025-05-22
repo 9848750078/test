@@ -1,0 +1,74 @@
+{
+  "_1": [
+    {
+      "transformed_column_name": "email",
+      "description": "The 'email' column stores the customer's email address for communication purposes.",
+      "transformation_logic": ""
+    },
+    {
+      "transformed_column_name": "contact_preferences.acc_status_services",
+      "description": "The 'acc_status_services' column indicates the customer's preferences or status related to account services, or other relevant statuses.",
+      "transformation_logic": ""
+    },
+    {
+      "transformed_column_name": "contact_preferences.credit_card_offers",
+      "description": "The 'credit_card_offers' column signifies whether the customer has opted to receive offers related to credit cards, with choices of 'Yes' or 'No'.",
+      "transformation_logic": ""
+    },
+    {
+      "transformed_column_name": "contact_preferences.credit_score_fin_well",
+      "description": "The 'credit_score_fin_well' column pertains to the customer's interest in financial wellness related to credit scores, with responses recorded as 'Yes' or 'No'.",
+      "transformation_logic": ""
+    },
+    {
+      "transformed_column_name": "contact_preferences.feedback",
+      "description": "This column indicates whether the customer has opted to receive information about Feedback, with options for 'Yes' or 'No'.",
+      "transformation_logic": ""
+    },
+    {
+      "transformed_column_name": "contact_preferences.partner_promotions",
+      "description": "This column indicates whether the customer has opted to receive information about partner promotions, with options for 'Yes' or 'No'.",
+      "transformation_logic": ""
+    },
+    {
+      "transformed_column_name": "contact_preferences.pers_loan_offers",
+      "description": "This column indicates whether the customer has opted to receive information about personal loan offers, with options for 'Yes' or 'No'.",
+      "transformation_logic": ""
+    },
+    {
+      "transformed_column_name": "contact_preferences.recognition",
+      "description": "This column indicates whether the customer has opted to receive recognition, with choices of 'Yes' or 'No'.",
+      "transformation_logic": ""
+    },
+    {
+      "transformed_column_name": "version",
+      "description": "version",
+      "transformation_logic": ""
+    },
+    {
+      "transformed_column_name": "deliverylogid",
+      "description": "A unique identifier associated with the delivery log entry information.",
+      "transformation_logic": ""
+    },
+    {
+      "transformed_column_name": "campaignid",
+      "description": "The unique identifier assigned to a specific marketing campaign.",
+      "transformation_logic": ""
+    },
+    {
+      "transformed_column_name": "source",
+      "description": "Column contains details about the originating system.",
+      "transformation_logic": ""
+    },
+    {
+      "transformed_column_name": "updated_at",
+      "description": "The timestamp indicating the last update of a record in the database.",
+      "transformation_logic": ""
+    },
+    {
+      "transformed_column_name": "customer_type",
+      "description": "A classification indicating the type or category of the customer.",
+      "transformation_logic": ""
+    }
+  ]
+}
