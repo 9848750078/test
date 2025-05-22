@@ -1,0 +1,159 @@
+ import os
+import requests
+import boto3
+import json
+import pytz
+from utils.constants.services.s3 import BUCKET_SVCSHUB_SNOWFLAKE,ICM_V2_PAI_PREFIX,ICM_V2_PAI_OUTPUT_PREFIX
+from airflow.providers.snowflake.hooks.snowflake import SnowflakeHook
+from airflow.hooks.base_hook import BaseHook
+from botocore.exceptions import NoCredentialsError
+from datetime import datetime, timedelta
+import logging
+from utils.constants.dag import default_args as dag_args, log_level, schedule_interval
+from common import snowflake_operation
+from common.task_failure_alert import task_failure_alert
+from icm_v2 import (
+        s3_client_operation,snowflake_audit_check)
+from icm_v2.snowflake_unload import prior_affiliate_inquiry as prior_affiliate_inquiry_unload
+from utils.constants.dag import schedule_interval
+from utils.constants.airflow import variables
+from airflow.models import Variable
+from utils.dag_config import intervals, start_dates
+from utils.constants.dag.default_dag_configs import (
+    MAX_ACTIVE_RUNS,
+    MAX_ACTIVE_TASKS,
+    RETRIES,
+)
+from utils.constants.dag.names import ICM_V2_PRIOR_AFFILIATE_INQUIRY_DAG as dag_name
+from utils.constants.dag.versions import ICM_V2_PRIOR_AFFILIATE_INQUIRY_DAG_VERSION as dag_version
+from utils.constants.airflow.variables import ICM_V2_LOAD_PULSE_IO_API
+from utils.constants.services.stepfunction_names import ICM_V2_SEND_DATA_PULSEIO_API_STEP_FUNCTION_ARN, ICM_V2_XFM_STEP_FUNCTION_ARN
+from utils.constants.task import filenames, names, op_kwargs
+#from utils.dag_config import intervals, start_dates
+from airflow import DAG
+from airflow.operators.python import PythonOperator, ShortCircuitOperator
+from airflow.operators.dummy_operator import DummyOperator
+from airflow.utils.dates import days_ago
+from airflow.providers.amazon.aws.hooks.step_function import StepFunctionHook
+from airflow.providers.amazon.aws.operators.step_function import StepFunctionStartExecutionOperator
+from airflow.operators.dagrun_operator import TriggerDagRunOperator
+from airflow.sensors.external_task import ExternalTaskSensor
+
+
+current_timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+custom_execution_name = f'icm_v2_prior_affiliate_inquiry_load_pulseio_api-{current_timestamp}'
+cst = pytz.timezone('America/Chicago')
+execution_date = datetime.now(pytz.utc).astimezone(cst).strftime('%Y%m%d')
+s3_prefix = f"{ICM_V2_PAI_PREFIX}{execution_date}"
+
+dag_id = f"{dag_name}-v{dag_version}"
+hour, minute = start_dates.get_delta(dag_name)
+hour_interval, minute_interval = intervals.get_interval(dag_name)
+schedule_interval = f"{minute_interval} {hour_interval} * * *"
+
+AIRFLOW_LOCAL_SETUP = os.environ.get("AIRFLOW_LOCAL_SETUP")
+
+aws_access_key = os.environ.get("AWS_ACCESS_KEY_ID")
+aws_secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+aws_session_token = os.environ.get("AWS_SESSION_TOKEN")
+
+
+def check_icm_v2_load_pulse_io_api(**kwargs):    
+    # Retrieve the value of the Airflow variable
+    is_icm_v2_load_pulse_io_api_enabled = (
+        Variable.get(variables.ICM_V2_LOAD_PULSE_IO_API, "False").lower() == "true"                
+    )    
+    # Log the flag value for debugging purposes
+    print(f"Value of flag is: {is_icm_v2_load_pulse_io_api_enabled}")
+
+    if not is_icm_v2_load_pulse_io_api_enabled:  # If the flag is False
+        print("Skipping load to API")
+        return False
+    else:  # If the flag is True
+        print("Loading to API")
+        return True
+
+def skip_task_function():
+    print("Skipping the load task")   
+    # If False, ShortCircuitOperator will skip downstream tasks
+
+default_args = {
+    "start_date": days_ago(1),
+    "retries": RETRIES,
+    "on_failure_callback": task_failure_alert,
+}
+
+icm_v2_pai_dag=DAG(
+    dag_id=dag_id,
+    default_args=default_args,
+    is_paused_upon_creation=True,
+    catchup=False,
+    schedule_interval=schedule_interval,
+    max_active_runs=MAX_ACTIVE_RUNS,
+    max_active_tasks=MAX_ACTIVE_TASKS,
+)
+
+if (os.environ.get("AIRFLOW__OMF__ENV_NAME") == "dev") or (os.environ.get("AIRFLOW__OMF__ENV_NAME") == "stg"):
+    snowflake_audit_check = DummyOperator(
+        task_id = 'snowflake_audit_check',
+        dag=icm_v2_pai_dag,
+    )
+else:
+    # Define the PythonOperator task to check count
+    snowflake_audit_check = PythonOperator(
+        task_id='snowflake_audit_check',
+        python_callable=snowflake_audit_check.snowflake_audit_check,
+        op_kwargs={"query": "select count(*) from (SELECT distinct table_name FROM eds.etl.v_audit_load_detail WHERE table_name = 'prior_affiliate_data'   AND schema_name = 'bdm'   AND load_end_time::date = CONVERT_TIMEZONE('UTC', 'America/Chicago', CURRENT_TIMESTAMP)::date);"},
+        provide_context=True,
+        dag=icm_v2_pai_dag,
+    )    
+
+snowflake_unload = PythonOperator(
+        task_id=names.SNOWFLAKE_UNLOAD,
+        python_callable=snowflake_operation.execute_with_params,
+        op_kwargs={
+            op_kwargs.SQL_PATH: os.path.abspath(
+	    prior_affiliate_inquiry_unload.__file__).replace("__init__.py", f"{filenames.SNOWFLAKE_UNLOAD}.sql"),
+	    "s3_prefix": s3_prefix,
+        },
+    dag=icm_v2_pai_dag,
+)
+
+
+conditional_task = ShortCircuitOperator(
+        task_id='conditional_task',
+        python_callable=check_icm_v2_load_pulse_io_api,
+        provide_context=True,
+        dag=icm_v2_pai_dag,
+    )
+
+
+    # Task to log a message if condition is false
+skip_task = PythonOperator(
+        task_id='skip_task',
+        python_callable=skip_task_function,
+        dag=icm_v2_pai_dag,
+    )
+
+    # Dummy task to finalize the workflow
+end_task = DummyOperator(
+         task_id='end_task',
+        dag=icm_v2_pai_dag,
+
+    )
+
+trigger_step_function_to_send_data_pulse_api = TriggerDagRunOperator(
+    task_id="trigger_step_function_to_send_data_pulse_api", 
+    trigger_dag_id="trigger_step_function_icm_v2_send_data_pulseio_api_dag",  # Child DAG ID    
+        conf={
+        "bucket_name": BUCKET_SVCSHUB_SNOWFLAKE,        
+        "prefix_output": ICM_V2_PAI_OUTPUT_PREFIX+str(execution_date)+"/",
+        "job_name": "icm_v2_prior_affiliate_inquiry",
+        "base_path": ICM_V2_PAI_PREFIX        
+    },
+    dag=icm_v2_pai_dag,
+)
+
+snowflake_audit_check >> snowflake_unload >> conditional_task
+conditional_task >> trigger_step_function_to_send_data_pulse_api >> end_task
+conditional_task >> skip_task >> end_task
