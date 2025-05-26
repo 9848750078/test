@@ -1,0 +1,612 @@
+import pandas as pd
+import sys
+import os
+import ast
+from jsonschema import validate, ValidationError
+from awsglue.transforms import *
+from awsglue.dynamicframe import DynamicFrame
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from pyspark.sql import SparkSession
+from pyspark.sql.types import *
+from pyspark.sql.functions import *
+from datetime import datetime
+import pyspark.sql.functions as F
+from pyspark.sql.window import Window
+import boto3
+import logging
+import json
+
+# Set up logging
+MSG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+logging.basicConfig(format=MSG_FORMAT, datefmt=DATETIME_FORMAT)
+logger = logging.getLogger("MVP2-PHONE")
+logger.setLevel(logging.INFO)
+
+
+# Create a GlueContext
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+
+# Get the arguments passed to the job
+args = getResolvedOptions(sys.argv, ['JOB_NAME', 'source_bucket', 'target_bucket', 'reject_bucket', 'source_prefix', 'target_prefix', 'tags_to_set', 'file_start_date', 'file_datetime', 'Newfiles_to_process', 'all_files_prefix', 'Input_param_dynamodb', 'pipeline','file_name'])
+
+# Initialize the Glue job
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+
+
+source_bucket = args['source_bucket']
+target_bucket = args['target_bucket']
+reject_bucket = args['reject_bucket']
+source_prefix = args['source_prefix']
+target_prefix = args['target_prefix']
+tags_to_set = args['tags_to_set']
+file_start_date = args['file_start_date']
+file_datetime = args['file_datetime']
+file_name = args['file_name']
+Newfiles_to_process = args['Newfiles_to_process']
+print(Newfiles_to_process)
+Newfiles_to_process = json.loads(Newfiles_to_process)
+Input_param_dynamodb = args["Input_param_dynamodb"]
+all_files_prefix = args["all_files_prefix"]
+
+
+logger.info(f"Bucket : {source_bucket}")
+logger.info(f"Source prefix : {source_prefix}")
+logger.info(f"Target table : {target_bucket}")
+logger.info(f"Target prefix : {target_prefix}")
+logger.info(f"All_files_prefix : {all_files_prefix}")
+logger.info(f"file_datetime : {file_datetime}")
+
+
+# Initialize the S3 client
+s3 = boto3.client('s3')
+source_prefix = source_prefix + '/' + file_name
+target_prefix = target_prefix + '/' + file_datetime
+
+# Define JSON schema
+json_schema = {
+    "$schema": "https://json-schema.org/draft/2019-09/schema",
+    "type": "object",
+    "title": "pfc-consent-schema",
+    "properties": {
+        "id": {
+            "type": "string",
+            "examples": [
+                "0fe84c94-8609-495a-b70d-c6327ddf3c15"
+            ]
+        },
+        "phoneNumber": {
+            "type": "string",
+            "examples": [
+                "8124777700"
+            ]
+        },
+        "sourceChannel": {
+            "type": ["string", "null"],
+            "examples": [
+                "NOT_PROVIDED"
+            ]
+        },
+        "nationalDncRegIndicator": {
+            "type": ["boolean", "null"],
+            "examples": [
+                False
+            ]
+        },
+        "busfunctionConsent": {
+            "type": "object",
+            "properties": {
+                "PROMOTIONAL": {
+                    "type": "object",
+                    "properties": {
+                        "indicator": {
+                            "type": "boolean",
+                            "examples": [
+                                False
+                            ]
+                        },
+                        "timestamp": {
+                            "type": "string",
+                            "examples": [
+                                "2024-10-04T14:59:29.504Z"
+                            ],
+                            "format": "date-time"
+                        },
+                        "tcpaConsent": {
+                            "type": "object",
+                            "properties": {
+                                "DIALER": {
+                                    "type": "object",
+                                    "properties": {
+                                        "indicator": {
+                                            "type": "boolean",
+                                            "examples": [
+                                                False
+                                            ]
+                                        },
+                                        "timestamp": {
+                                            "type": "string",
+                                            "examples": [
+                                                "2024-10-04T14:59:29.504Z"
+                                            ],
+                                            "format": "date-time"
+                                        }
+                                    },
+                                    "additionalProperties": True,
+                                    "required": [
+                                        "indicator",
+                                        "timestamp"
+                                    ]
+                                },
+                                "SMS": {
+                                    "type": "object",
+                                    "properties": {
+                                        "indicator": {
+                                            "type": "boolean",
+                                            "examples": [
+                                                False
+                                            ]
+                                        },
+                                        "timestamp": {
+                                            "type": "string",
+                                            "examples": [
+                                                "2024-10-04T14:59:29.504Z"
+                                            ],
+                                            "format": "date-time"
+                                        }
+                                    },
+                                    "additionalProperties": True,
+                                    "required": [
+                                        "indicator",
+                                        "timestamp"
+                                    ]
+                                }
+                            },
+                            "additionalProperties": True
+                        }
+                    },
+                    "additionalProperties": True,
+                    "required": [
+                        "indicator",
+                        "timestamp"
+                    ]
+                },
+                "SERVICING": {
+                    "type": "object",
+                    "properties": {
+                        "indicator": {
+                            "type": "boolean",
+                            "examples": [
+                                False
+                            ]
+                        },
+                        "timestamp": {
+                            "type": "string",
+                            "examples": [
+                                "2024-10-04T14:59:29.504Z"
+                            ],
+                            "format": "date-time"
+                        },
+                        "tcpaConsent": {
+                            "type": "object",
+                            "properties": {
+                                "DIALER": {
+                                    "type": "object",
+                                    "properties": {
+                                        "indicator": {
+                                            "type": "boolean",
+                                            "examples": [
+                                                False
+                                            ]
+                                        },
+                                        "timestamp": {
+                                            "type": "string",
+                                            "examples": [
+                                                "2024-10-04T14:59:29.504Z"
+                                            ],
+                                            "format": "date-time"
+                                        }
+                                    },
+                                    "additionalProperties": True,
+                                    "required": [
+                                        "indicator",
+                                        "timestamp"
+                                    ]
+                                },
+                                "SMS": {
+                                    "type": "object",
+                                    "properties": {
+                                        "indicator": {
+                                            "type": "boolean",
+                                            "examples": [
+                                                False
+                                            ]
+                                        },
+                                        "timestamp": {
+                                            "type": "string",
+                                            "examples": [
+                                                "2024-10-04T14:59:29.504Z"
+                                            ],
+                                            "format": "date-time"
+                                        }
+                                    },
+                                    "additionalProperties": True,
+                                    "required": [
+                                        "indicator",
+                                        "timestamp"
+                                    ]
+                                }
+                            },
+                            "additionalProperties": True
+                        }
+                    },
+                    "additionalProperties": True,
+                    "required": [
+                        "indicator",
+                        "timestamp"
+                    ]
+                }
+            },
+            "additionalProperties": True
+        },
+        "phoneTypeName": {
+            "type": ["string", "null"],
+            "examples": [
+                "HOME"
+            ]
+        },
+        "contactStatus": {
+            "type": ["string", "null"],
+            "examples": [
+                "DONOTCALL"
+            ]
+        },
+        "smsCode": {
+            "type": ["string", "null"]
+        },
+        "ipAddress": {
+            "type": ["string", "null"]
+        },
+        "customerName": {
+            "type": ["string", "null"]
+        },
+        "roleType": {
+            "type": ["string", "null"],
+            "examples": [
+                "BORROWER"
+            ]
+        },
+        "appId": {
+            "type": ["string", "null"]
+        },
+        "uaiId": {
+            "type": ["string", "null"],
+            "examples": [
+                "0996577327219"
+            ]
+        },
+        "campaignId": {
+            "type": ["string", "null"]
+        },
+        "responseKeyword": {
+            "type": ["string", "null"]
+        },
+        "teamMemberId": {
+            "type": ["string", "null"],
+            "examples": [
+                "B5031875"
+            ]
+        },
+        "sourceScreenName": {
+            "type": ["string", "null"]
+        },
+        "customerAccountLookupId": {
+            "type": ["string", "null"]
+        },
+        "source": {
+            "type": "string",
+            "examples": [
+                "CLASS"
+            ]
+        },
+        "correlationId": {
+            "type": ["string", "null"]
+        },
+        "ext_updated_at": {
+            "type": ["string", "null"],
+            "examples": [
+                "2024-10-04T14:59:30.926Z"
+            ],
+            "format": "date-time"
+        },
+        "contactStatusChangeTimestamp": {
+            "type": ["string", "null"],
+            "examples": [
+                "2024-10-04T14:59:30.926Z"
+            ],
+            "format": "date-time"
+        },
+        "createdAt": {
+            "type": "string",
+            "examples": [
+                "2024-10-04T14:54:49.501703Z"
+            ],
+            "format": "date-time"
+        },
+        "updatedAt": {
+            "type": ["string", "null"],
+            "examples": [
+                "2024-10-04T15:00:14.474361259Z"
+            ],
+            "format": "date-time"
+        },
+        "deletedAt": {
+            "type": ["string", "null"],
+            "format": "date-time"
+        }
+    },
+    "additionalProperties": True,
+    "required": [
+        "id",
+        "phoneNumber",
+        "source",
+        "createdAt"
+    ]
+}
+
+# Define spark schema
+def create_spark_schema():
+    return StructType([
+        StructField("id", StringType(), True),
+        StructField("phoneNumber", StringType(), True),
+        StructField("sourceChannel", StringType(), True),
+        StructField("nationalDncRegIndicator", BooleanType(), True),
+        StructField("busfunctionConsent_PROMOTIONAL_indicator", BooleanType(), True),
+        StructField("busfunctionConsent_PROMOTIONAL_timestamp", StringType(), True),
+        StructField("busfunctionConsent_PROMOTIONAL_tcpaConsent_DIALER_indicator", BooleanType(), True),
+        StructField("busfunctionConsent_PROMOTIONAL_tcpaConsent_DIALER_timestamp", StringType(), True),
+        StructField("busfunctionConsent_PROMOTIONAL_tcpaConsent_SMS_indicator", BooleanType(), True),
+        StructField("busfunctionConsent_PROMOTIONAL_tcpaConsent_SMS_timestamp", StringType(), True),
+        StructField("busfunctionConsent_SERVICING_indicator", BooleanType(), True),
+        StructField("busfunctionConsent_SERVICING_timestamp", StringType(), True),
+        StructField("busfunctionConsent_SERVICING_tcpaConsent_DIALER_indicator", BooleanType(), True),
+        StructField("busfunctionConsent_SERVICING_tcpaConsent_DIALER_timestamp", StringType(), True),
+        StructField("busfunctionConsent_SERVICING_tcpaConsent_SMS_indicator", BooleanType(), True),
+        StructField("busfunctionConsent_SERVICING_tcpaConsent_SMS_timestamp", StringType(), True),
+        StructField("phoneTypeName", StringType(), True),
+        StructField("contactStatus", StringType(), True),
+        StructField("smsCode", StringType(), True),
+        StructField("ipAddress", StringType(), True),
+        StructField("customerName", StringType(), True),
+        StructField("roleType", StringType(), True),
+        StructField("appId", StringType(), True),
+        StructField("uaiId", StringType(), True),
+        StructField("campaignId", StringType(), True),
+        StructField("responseKeyword", StringType(), True),
+        StructField("teamMemberId", StringType(), True),
+        StructField("sourceScreenName", StringType(), True),
+        StructField("customerAccountLookupId", StringType(), True),
+        StructField("source", StringType(), True),
+        StructField("correlationId", StringType(), True),
+        StructField("ext_updated_at", StringType(), True),
+        StructField("contactStatusChangeTimestamp", StringType(), True),
+        StructField("createdAt", StringType(), True),
+        StructField("updatedAt", StringType(), True),
+        StructField("deletedAt", StringType(), True)
+    ])
+
+
+def build_uri_from_bucket_and_key(source_bucket, key):
+    return "s3://" + os.path.join(source_bucket, key)
+
+def get_all_objects_from_s3(source_bucket, all_files_prefix, add_last_modified_datetime=False):
+    """
+    This will return the Files from S3 Raw Folder based on the Last Modified Datetime
+    If the Last Modified was the last updated File then no File will be returned.
+    """
+    response = s3.list_objects_v2(Bucket=source_bucket, Prefix=all_files_prefix)
+    logger.info(f"s3.list_objects_v2 : Response ")
+    files_all = []
+    if "Contents" in response:
+        for obj in response["Contents"]:
+            if obj["Key"][-1:] != "/":
+                files_all.append(obj)
+    if add_last_modified_datetime:
+        files_all = [
+            (build_uri_from_bucket_and_key(source_bucket, file["Key"]), file["LastModified"])
+            for file in files_all
+        ]
+    else:
+        files_all = [build_uri_from_bucket_and_key(source_bucket, file["Key"]) for file in files_all]
+    return files_all
+
+
+
+
+
+def read_all_json_files(s3,file_start_date):
+    files_all = get_all_objects_from_s3(source_bucket, all_files_prefix, True)
+    logger.info(f"Get all the objects from s3 : files_all : {len(files_all)} -- \n {files_all}")
+    logger.info( file_start_date)
+    #file_start_date = datetime.strptime(file_start_date[3:], '%Y-%m-%d %H:%M:%S')
+    logger.info('updated file_start_date')
+    file_to_process = Newfiles_to_process    
+    logger.info(f'Total file_to_process = {len(file_to_process)} \n file_to_process List : {file_to_process}')
+    if len(file_to_process) < 1:
+        logger.info("No files were found to process")
+        raise Exception(f"{args['JOB_NAME']} : Exception raised - No New Data Files Found")
+    paginator = s3.get_paginator('list_objects_v2')
+    json_data = []
+    processed_files = []
+    
+    for file in file_to_process:
+        data_file = build_uri_from_bucket_and_key(source_bucket, file)
+        print("Value of data_file is - ",data_file)
+        logger.info(f"Started Reading the input_data file : {data_file}")
+        processed_files.append(file)
+        response = s3.get_object(Bucket=source_bucket, Key=file)
+        #file_content = response['Body'].read().decode('utf-8')
+        
+        file_content = response['Body'].read().decode('utf-8').splitlines()
+        #print("Value of file_content is - ",file_content)
+        # Split the file content into separate JSON objects
+        #json_objects = file_content.strip().split('\n')
+        #print("Value of json_objects is - ",json_objects)
+        json_data.extend(json.loads(line.strip()) for line in file_content)
+
+    # Log the processed files
+    logger.info(f"Processed {len(processed_files)} files: {processed_files}")
+    #logger.info(f"Processed {len(processed_files)} files: {json_data}")
+    return json_data, processed_files
+
+def validate_json_data(json_data):
+    valid_data = []
+    rejected_schema_mismatch = []
+    rejected_id_zero_or_empty = []
+    rejected_duplicates = []
+    results = []
+    #seen_records = set()
+
+    for line_number, record in enumerate(json_data, start=1):
+        #record_key = (record.get('id'), record.get('phoneNumber'), record.get('sourceChannel'), record.get('nationalDncRegIndicator'), record.get('busfunctionConsent_PROMOTIONAL_indicator'), record.get('busfunctionConsent_PROMOTIONAL_tcpaConsent_DIALER_indicator'), record.get('busfunctionConsent_PROMOTIONAL_tcpaConsent_SMS_indicator'), record.get('busfunctionConsent_SERVICING_indicator'), record.get('busfunctionConsent_SERVICING_tcpaConsent_DIALER_indicator'), record.get('busfunctionConsent_SERVICING_tcpaConsent_SMS_indicator'), record.get('phoneTypeName'), record.get('contactStatus'), record.get('smsCode'), record.get('ipAddress'), record.get('customerName'), record.get('roleType'), record.get('appId'), record.get('uaiId'), record.get('campaignId'), record.get('responseKeyword'), record.get('teamMemberId'), record.get('sourceScreenName'), record.get('customerAccountLookupId'), record.get('source'), record.get('correlationId'))
+
+        #if record_key in seen_records:
+        #    rejected_duplicates.append(record)
+        #    results.append((line_number, "Duplicate record!", record))
+        #    continue
+        
+       # seen_records.add(record_key)
+
+        if any(not record.get(field) for field in ['id', 'phoneNumber', 'source', 'createdAt']):
+            rejected_id_zero_or_empty.append(record)
+            results.append((line_number, "Field is empty or null.", record))
+            continue
+       
+        if record.get('id') == '00000000-0000-0000-0000-000000000000':
+            rejected_id_zero_or_empty.append(record)
+            results.append((line_number, "ID is invalid (all zeros).", record))
+            continue
+        
+        try:
+            validate(instance=record, schema=json_schema)
+            valid_data.append(record)
+            results.append((line_number, "Valid JSON!", record))
+        except ValidationError:
+            rejected_schema_mismatch.append(record)
+            results.append((line_number, "JSON does not match the schema!", record))
+        except json.JSONDecodeError as e:
+            rejected_schema_mismatch.append(record)
+            results.append((line_number, "Invalid JSON!", str(e)))
+
+    return valid_data, rejected_schema_mismatch, rejected_id_zero_or_empty, rejected_duplicates, results
+    
+
+    
+
+def process_data(s3,file_start_date):
+    
+    json_data, processed_files = read_all_json_files(s3,file_start_date)  # Unpack the result
+    valid_data, rejected_schema_mismatch, rejected_id_zero_or_empty, rejected_duplicates, results = validate_json_data(json_data)
+
+    # Print summary of processed records
+    for line_number, status, message in results:
+        #print(f"Line {line_number}: {status}")
+        if status != "Valid JSON!":
+            print("Error Message:", message)
+
+    # Print summary
+    print(f"Total files processed: {len(processed_files)}")
+    print(f"Total processed file Names: {processed_files}")
+    print(f"Total records processed: {len(json_data)}")
+    print(f"Total valid records: {len(valid_data)}")
+    print(f"Total rejected records due to schema mismatch: {len(rejected_schema_mismatch)}")
+    print(f"Total rejected records with zero or empty IDs: {len(rejected_id_zero_or_empty)}")
+    #print(f"Total rejected duplicate records: {len(rejected_duplicates)}")
+
+    if len(json_data) == len(rejected_schema_mismatch) + len(rejected_id_zero_or_empty) + len(rejected_duplicates):
+        print("Error: Job failed. All records were rejected due to schema mismatch, invalid IDs or duplicates.")
+        raise Exception("Job failed: Total processed records equals the total rejected records count due to schema mismatch, invalid IDs or duplicates.")
+
+    # Create a DataFrame and handle null values
+    if valid_data:
+        for entry in valid_data:
+            # Set null values for busfunctionConsent fields if not provided
+            entry['busfunctionConsent_PROMOTIONAL_indicator'] = entry.get('busfunctionConsent', {}).get('PROMOTIONAL', {}).get('indicator', None)
+            entry['busfunctionConsent_PROMOTIONAL_timestamp'] = entry.get('busfunctionConsent', {}).get('PROMOTIONAL', {}).get('timestamp', None)
+            entry['busfunctionConsent_PROMOTIONAL_tcpaConsent_DIALER_indicator'] = entry.get('busfunctionConsent', {}).get('PROMOTIONAL', {}).get('tcpaConsent', {}).get('DIALER', {}).get('indicator', None)
+            entry['busfunctionConsent_PROMOTIONAL_tcpaConsent_DIALER_timestamp'] = entry.get('busfunctionConsent', {}).get('PROMOTIONAL', {}).get('tcpaConsent', {}).get('DIALER', {}).get('timestamp', None)
+            entry['busfunctionConsent_PROMOTIONAL_tcpaConsent_SMS_indicator'] = entry.get('busfunctionConsent', {}).get('PROMOTIONAL', {}).get('tcpaConsent', {}).get('SMS', {}).get('indicator', None)
+            entry['busfunctionConsent_PROMOTIONAL_tcpaConsent_SMS_timestamp'] = entry.get('busfunctionConsent', {}).get('PROMOTIONAL', {}).get('tcpaConsent', {}).get('SMS', {}).get('timestamp', None)
+            entry['busfunctionConsent_SERVICING_indicator'] = entry.get('busfunctionConsent', {}).get('SERVICING', {}).get('indicator', None)
+            entry['busfunctionConsent_SERVICING_timestamp'] = entry.get('busfunctionConsent', {}).get('SERVICING', {}).get('timestamp', None)
+            entry['busfunctionConsent_SERVICING_tcpaConsent_DIALER_indicator'] = entry.get('busfunctionConsent', {}).get('SERVICING', {}).get('tcpaConsent', {}).get('DIALER', {}).get('indicator', None)
+            entry['busfunctionConsent_SERVICING_tcpaConsent_DIALER_timestamp'] = entry.get('busfunctionConsent', {}).get('SERVICING', {}).get('tcpaConsent', {}).get('DIALER', {}).get('timestamp', None)
+            entry['busfunctionConsent_SERVICING_tcpaConsent_SMS_indicator'] = entry.get('busfunctionConsent', {}).get('SERVICING', {}).get('tcpaConsent', {}).get('SMS', {}).get('indicator', None)
+            entry['busfunctionConsent_SERVICING_tcpaConsent_SMS_timestamp'] = entry.get('busfunctionConsent', {}).get('SERVICING', {}).get('tcpaConsent', {}).get('SMS', {}).get('timestamp', None)
+
+        valid_file_path = f'{file_datetime}'
+        valid_df = spark.createDataFrame(valid_data, schema=create_spark_schema())
+        valid_df= valid_df.withColumn("duplicate_ts", F.when(F.col('updatedAt').isNull(), col('createdAt')).otherwise(col('updatedAt')))
+        
+        window_spec = Window.partitionBy('phoneNumber','sourceChannel','nationalDncRegIndicator','busfunctionConsent_PROMOTIONAL_indicator','busfunctionConsent_PROMOTIONAL_tcpaConsent_DIALER_indicator','busfunctionConsent_PROMOTIONAL_tcpaConsent_SMS_indicator','busfunctionConsent_SERVICING_indicator','busfunctionConsent_SERVICING_tcpaConsent_SMS_indicator','phoneTypeName','contactStatus','smsCode','ipAddress','customerName','roleType','appId','uaiId','campaignId','responseKeyword','teamMemberId','sourceScreenName','customerAccountLookupId','source','correlationId').orderBy(desc('duplicate_ts'))
+        valid_df = valid_df.withColumn("row_number", row_number().over(window_spec))
+        rec_dup =  valid_df.filter(col('row_number') > 1)
+        dups_count = rec_dup.count()
+        print(f"duplicate records :",dups_count )
+        if(dups_count > 0):
+            rec_dup.coalesce(1).write.mode("overwrite").json(f's3://{reject_bucket}/communication_consent_history_phone/rejected_data/{file_datetime}/duplicate_records')
+        #rec_dup.coalesce(1).write.json()
+        
+        valid_df = valid_df.filter(col('row_number') == 1).drop('row_number')
+        valid_df = valid_df.drop('duplicate_ts')
+        valid_df.coalesce(1).write.parquet(f's3://{target_bucket}/{target_prefix}')
+        print(f"Uploaded valid data to s3://{target_bucket}/{target_prefix}")
+
+    # Upload rejected data
+    def upload_rejected_data(rejected_data, path):
+        if rejected_data:
+            reject_data_json = '\n'.join(json.dumps(record) for record in rejected_data)
+            s3.put_object(Bucket=reject_bucket, Key=path, Body=reject_data_json)
+            print(f"Uploaded rejected data to s3://{reject_bucket}/{path}")
+
+    upload_rejected_data(rejected_schema_mismatch, f'communication_consent_history_phone/rejected_data/{file_datetime}/schema_notmatch/schema_notmatch.json')
+    upload_rejected_data(rejected_id_zero_or_empty, f'communication_consent_history_phone/rejected_data/{file_datetime}/id_zero/id_zero.json')
+    #upload_rejected_data(rejected_duplicates, f'communication_consent_history_phone/rejected_data/{file_datetime}/duplicate_records/duplicate_records.json')
+
+if __name__ == "__main__":
+    
+    process_data(s3,f'{file_start_date}')
+    
+    
+    # Tagging S3 objects
+    logger.info("Tagging S3 objects")
+    tags_to_set = 'Domain:Loan,Classification:PII.Sensitive'  # Update as needed
+    tags = []
+    for tag_string in tags_to_set.split(','):
+        key, value = tag_string.strip().split(':')
+        tags.append({'Key': key.strip(), 'Value': value.strip()})
+    logger.info(f"tags: {tags}")
+
+    response = s3.list_objects_v2(Bucket=target_bucket, Prefix=target_prefix + '/')
+    #logger.info(f"bucket response: {response}")
+
+    files = [obj['Key'] for obj in response.get('Contents', []) if not obj['Key'].endswith('/')]
+    logger.info(f"files: {files}")
+
+    for file in files:
+        s3.put_object_tagging(
+            Bucket=target_bucket,
+            Key=file,
+            Tagging={
+                'TagSet': tags
+            }
+        )
+    logger.info("Tagging completed")
+
+    job.commit()
