@@ -1,0 +1,780 @@
+import inspect
+import sys
+import boto3
+import json
+import datetime
+import pytz
+import time
+from awsglue.job import Job
+import logging
+from botocore.exceptions import ClientError
+from awsglue.transforms import *
+from pyspark.sql.session import SparkSession
+from pyspark.sql import Row
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.dynamicframe import DynamicFrame
+from py4j.java_gateway import java_import
+import os
+import io
+import requests
+from pyspark.sql.types import *
+from pyspark.sql.functions import *
+from pyspark.sql.functions import sum as _sum
+from pyspark.sql.window import Window
+import pyspark.sql.functions as F
+import pyspark.sql as sql
+
+start_time=datetime.datetime.now()
+
+MSG_FORMAT      = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+logging.basicConfig(format=MSG_FORMAT, datefmt=DATETIME_FORMAT)
+
+region  = os.environ['AWS_DEFAULT_REGION']
+now     = datetime.datetime.now()
+print('Intial : ',now)
+year    = now.strftime("%Y")
+month   = now.strftime("%m")
+day     = now.strftime("%d")
+
+check_cur_date      =  year+'-'+month+'-'+day
+print('Date : ', year+'-'+month+'-'+day)
+s3_client           = boto3.client('s3')
+
+current_ts = datetime.datetime.now(pytz.timezone('America/Chicago'))
+print(current_ts)
+
+args = getResolvedOptions(sys.argv, ['JOB_NAME', 
+                                    'PREPARED_BUCKET', 
+                                    'PROCESS_NAME', 
+                                    'SOURCE_PREFIX',
+                                    'file_datetime',
+                                    'TRANSFORMED_BUCKET',
+                                    'TRANSFORMED_TARGET_PREFIX',
+                                    'MANIFEST_BUCKET',
+                                    'DATABASE_NAME',
+                                    'TABLE_NAME',
+                                    'CATALOG_NM',
+                                    'REFINED_BUCKET',
+                                    'tags_to_set',
+                                    'Input_param_dynamodb',
+                                    'rejectbucket'
+                                    ])
+
+sc          = SparkContext()
+glueContext = GlueContext(sc)
+spark       = glueContext.spark_session
+spark.sql("set spark.sql.legacy.parquet.timeParserPolicy=CORRECTED")
+spark.sql("set spark.sql.legacy.parquet.int96RebaseModeInRead=CORRECTED")
+spark.sql("set spark.sql.legacy.parquet.int96RebaseModeInWrite=CORRECTED")
+spark.sql("set spark.sql.legacy.parquet.datetimeRebaseModeInRead=CORRECTED")
+spark.sql("set spark.sql.legacy.parquet.datetimeRebaseModeInWrite=CORRECTED")
+job         = Job(glueContext)
+
+job.init(args['JOB_NAME']+args['PROCESS_NAME'], args)
+logger = logging.getLogger(args['JOB_NAME'])
+logger.setLevel(logging.INFO)
+
+process_name                           = args['PROCESS_NAME']
+prepared_bucket                        = args['PREPARED_BUCKET']
+file_datetime                          = args['file_datetime']
+source_prefix                          = args['SOURCE_PREFIX']
+transformed_bucket                     = args['TRANSFORMED_BUCKET']
+target_prefix                          = args['TRANSFORMED_TARGET_PREFIX']
+manifest_bucket                        = args['MANIFEST_BUCKET']
+database_name                          = args['DATABASE_NAME']
+table_name                             = args['TABLE_NAME']
+catalog_nm                             = args['CATALOG_NM']
+refined_bucket                         = args['REFINED_BUCKET']
+tags_to_set                            = args['tags_to_set']
+Input_param_dynamodb                   = args['Input_param_dynamodb']
+rejectbucket                           = args['rejectbucket']
+
+lookup_prefix = target_prefix 
+target_prefix = target_prefix + '/' +file_datetime
+manifest_prefix = 'appcode/collibra/phone_cust_comm_preference/Manifest_files'+ '/' +file_datetime
+print("Printing Input Arguments : ")
+#print(args)
+
+r = requests.get("http://169.254.169.254/latest/dynamic/instance-identity/document")
+response_json = r.json()
+aws_region = response_json.get("region")
+logger.info("AWS region : {}".format(aws_region))
+
+# It Builds S3 Url with bucket and Key
+def build_uri_from_bucket_and_key(bucket, key):
+    return "s3://" + os.path.join(bucket, key)
+
+if __name__ == "__main__":
+
+    job_run_id = args['JOB_RUN_ID']
+    #logger.info(f"args : {args} JOB_RUN_ID is: {job_run_id}")
+
+    source_prefix = source_prefix + '/' + file_datetime
+    full_path_custcommpref = build_uri_from_bucket_and_key(prepared_bucket, source_prefix)
+
+    #print('full_path_custcommpref  : ',full_path_custcommpref)
+    input_df =spark.read.format("parquet").option("header",True).option("escape", '"').option("path",full_path_custcommpref).load()
+
+    input_df_count_with_dup = input_df.count()
+    # Initialize an empty list to store transformation details
+    transformation_details = []
+    
+    def document_it(description):
+        def decorator(func):
+            def wrapper(*args, **kwargs):
+                # Get source lines of the function
+                source_lines, start_line = inspect.getsourcelines(func)
+                
+                # Initialize a flag and a list to hold the relevant lines
+                capturing = False
+                captured_lines = []
+                captured_description = None
+                
+                # Loop through each line to find markers and capture the code and description
+                for line in source_lines:
+                    if "#document_it_begin" in line:
+                        capturing = True
+                        continue  # Skip the comment line
+                    if capturing:
+                        if "#document_it_end" in line:
+                            capturing = False
+                            continue  # Skip the comment line
+                        captured_lines.append(line.strip())
+                    # Capture the description
+                    if "#description:" in line:
+                        captured_description = line.split("#description:")[1].strip()
+    
+                # Add the captured code and description to the list of transformations
+                transformation_details.append({
+                    "transformed_column_name": func.__name__,
+                    "description": description,
+                    "transformation_logic": "\n".join(captured_lines)
+                })
+    
+               # print(transformation_details)
+                return func(*args, **kwargs)
+            return wrapper
+        return decorator
+        
+    print('hii')
+    #input_df.show(5, truncate=False)
+    
+   
+    
+    
+    
+
+        
+    @document_it(description="Detail of lineage in 'key : value' pair")
+    def lineage(input_df):
+        #document_it_begin
+      
+        
+        
+      
+        
+        column_mappings = {
+            "id": "id",
+            "phoneNumber": "phone_no",
+            "sourceChannel": "source_channel",
+            "nationalDncRegIndicator": "national_dnc_yn",
+            
+            # Promotional Consent
+            "busfunctionConsent_PROMOTIONAL_indicator": "promo_consent_yn",
+            "busfunctionConsent_PROMOTIONAL_timestamp": "promo_consent_ts",
+            "busfunctionConsent_PROMOTIONAL_tcpaConsent_DIALER_indicator": "promo_dialer_consent_yn",
+            "busfunctionConsent_PROMOTIONAL_tcpaConsent_DIALER_timestamp": "promo_dialer_consent_ts",
+            "busfunctionConsent_PROMOTIONAL_tcpaConsent_SMS_indicator": "promo_sms_consent_yn",
+            "busfunctionConsent_PROMOTIONAL_tcpaConsent_SMS_timestamp": "promo_sms_consent_ts",
+        
+            # Servicing Consent
+            "busfunctionConsent_SERVICING_indicator": "servicing_consent_yn",
+            "busfunctionConsent_SERVICING_timestamp": "servicing_consent_ts",
+            "busfunctionConsent_SERVICING_tcpaConsent_DIALER_indicator": "servicing_dialer_consent_yn",
+            "busfunctionConsent_SERVICING_tcpaConsent_DIALER_timestamp": "servicing_dialer_consent_ts",
+            "busfunctionConsent_SERVICING_tcpaConsent_SMS_indicator": "servicing_sms_consent_yn",
+            "busfunctionConsent_SERVICING_tcpaConsent_SMS_timestamp": "servicing_sms_consent_ts",
+        
+            # Other Fields
+            "phoneTypeName": "phone_type",
+            "contactStatus": "contact_status",
+            "smsCode": "sms_cd",
+            "ipAddress": "ip_address",
+            "customerName": "customer_name",
+            "roleType": "role_type",
+            "appId": "application_id",
+            "uaiId": "uai_id",
+            "campaignId": "campaign_id",
+            "responseKeyword": "response_keyword",
+            "teamMemberId": "team_member_id",
+            "sourceScreenName": "source_screen_name",
+            "customerAccountLookupId": "customer_account_lookup_id",
+            "source": "source",
+            "correlationId": "correlation_id",
+            "ext_updated_at": "external_update_ts",
+            "contactStatusChangeTimestamp": "contact_status_update_ts",
+            "createdAt": "effective_ts",
+            "updatedAt": "update_ts",
+            "deletedAt": "delete_ts"
+        }
+        
+        #print(column_mappings)
+        
+        for old_name, new_name in column_mappings.items():
+            print(old_name)
+            input_df = input_df.withColumnRenamed(old_name, new_name)
+
+        return input_df
+        #document_it_end
+    
+    input_df = lineage(input_df)
+    print('col rename')
+    #input_df.show(20, truncate=False)
+    
+    
+    bigint_columns = [
+        'application_id',
+        'uai_id',
+        'customer_account_lookup_id'
+    ]
+    
+    def convert_bigint_columns(input_df, columns):
+        for column in columns:
+            input_df = input_df.withColumn(column, col(column).cast(IntegerType()))
+        return input_df
+    
+    input_df = convert_bigint_columns(input_df, bigint_columns)   
+    
+   
+
+    timestamp_format = "yyyy-MM-dd HH:mm:ss"
+    timestamp_columns = [
+    'promo_consent_ts',
+    'promo_dialer_consent_ts',
+    'promo_sms_consent_ts',
+    'servicing_consent_ts',
+    'servicing_dialer_consent_ts',
+    'servicing_sms_consent_ts',
+    'external_update_ts',
+    'contact_status_update_ts',
+    'effective_ts',
+    'update_ts',
+    'delete_ts'
+    ]
+  
+    
+    
+    def convert_timestamp_columns(input_df, columns, format):
+        for column in columns:
+            #input_df = input_df.withColumn(column, from_utc_timestamp(column,"CST6CDT"))
+             input_df = input_df.withColumn(column, col(column).cast('timestamp'))
+        return input_df
+
+    input_df = convert_timestamp_columns(input_df, timestamp_columns, timestamp_format)
+    
+    print("after timestamp")
+    #input_df.show(5,truncate=False)
+    
+    @document_it(description="Column 'update_ts' is derived from column 'UPDATED_AT'")
+    def update_ts(input_df):
+       #document_it_begin
+       #document_it_end
+       return input_df
+
+    input_df = update_ts(input_df)
+    
+    @document_it(description="Updating effective_ts to createdAt if value is present otherwaise update_ts")
+    def effective_ts(input_df):
+        input_df = input_df.withColumn('effective_ts', F.when(F.col('update_ts').isNull(), col('effective_ts')).otherwise(col('update_ts')))
+        return input_df
+        
+    input_df = effective_ts(input_df)
+    
+    
+    @document_it(description="Column 'delete_ts' is derived from column 'deletedAt'")
+    def delete_ts(input_df):
+        #document_it_begin
+        #document_it_end
+        return input_df
+
+    input_df = delete_ts(input_df)
+  
+    
+    @document_it(description="Updating promo_consent_yn to 'Y' if value is 'true' otherwaise 'N'")
+    def promo_consent_yn(input_df):
+        #document_it_begin
+        input_df = input_df.withColumn('promo_consent_yn', F.when(F.col('promo_consent_yn').isNull(), None).when(F.col('promo_consent_yn') == 'true', 'Y').otherwise('N'))
+        return input_df
+        #document_it_end
+
+    input_df = promo_consent_yn(input_df)
+    
+    @document_it(description="Updating promo_dialer_consent_yn to 'Y' if value is 'true' otherwaise 'N'")
+    def promo_dialer_consent_yn(input_df):
+        #document_it_begin
+        input_df = input_df.withColumn('promo_dialer_consent_yn', F.when(F.col('promo_dialer_consent_yn').isNull(), None).when(F.col('promo_dialer_consent_yn') == 'true', 'Y').otherwise('N'))
+        return input_df
+        #document_it_end
+
+    input_df = promo_dialer_consent_yn(input_df)
+    
+    @document_it(description="Updating promo_sms_consent_yn to 'Y' if value is 'true' otherwaise 'N'")
+    def promo_sms_consent_yn(input_df):
+        #document_it_begin
+        input_df = input_df.withColumn('promo_sms_consent_yn', F.when(F.col('promo_sms_consent_yn').isNull(), None).when(F.col('promo_sms_consent_yn') == 'true', 'Y').otherwise('N'))
+        return input_df
+        #document_it_end
+
+    input_df = promo_sms_consent_yn(input_df)
+    
+    @document_it(description="Updating servicing_consent_yn to 'Y' if value is 'true' otherwaise 'N'")
+    def servicing_consent_yn(input_df):
+        #document_it_begin
+        input_df = input_df.withColumn('servicing_consent_yn', F.when(F.col('servicing_consent_yn').isNull(), None).when(F.col('servicing_consent_yn') == 'true', 'Y').otherwise('N'))
+        return input_df
+        #document_it_end
+
+    input_df = servicing_consent_yn(input_df)
+    
+    @document_it(description="Updating servicing_dialer_consent_yn to 'Y' if value is 'true' otherwaise 'N'")
+    def servicing_dialer_consent_yn(input_df):
+        #document_it_begin
+        input_df = input_df.withColumn('servicing_dialer_consent_yn', F.when(F.col('servicing_dialer_consent_yn').isNull(), None).when(F.col('servicing_dialer_consent_yn') == 'true', 'Y').otherwise('N'))
+        return input_df
+        #document_it_end
+
+    input_df = servicing_dialer_consent_yn(input_df)
+    
+    @document_it(description="Updating servicing_sms_consent_yn to 'Y' if value is 'true' otherwaise 'N'")
+    def servicing_sms_consent_yn(input_df):
+        #document_it_begin
+        input_df = input_df.withColumn('servicing_sms_consent_yn', F.when(F.col('servicing_sms_consent_yn').isNull(), None).when(F.col('servicing_sms_consent_yn') == 'true', 'Y').otherwise('N'))
+        return input_df
+        #document_it_end
+
+    input_df = servicing_sms_consent_yn(input_df)
+    
+    @document_it(description="Updating national_dnc_yn to 'Y' if value is 'true' otherwaise 'N'")
+    def national_dnc_yn(input_df):
+        #document_it_begin
+        input_df = input_df.withColumn('national_dnc_yn', F.when(F.col('national_dnc_yn').isNull(), None).when(F.col('national_dnc_yn') == 'true', 'Y').otherwise('N'))
+        return input_df
+        #document_it_end
+        
+    input_df = national_dnc_yn(input_df)
+    
+    #TCPA CODE STARTS HERE
+    
+    # Create a window partitioned by phone_no and ordered by effective_ts
+    window_spec = Window.partitionBy('phone_no').orderBy('effective_ts')
+    
+    # Use lag to track the last valid row for comparison
+    input_df = input_df.withColumn('prev_promo_consent_yn', lag('promo_consent_yn').over(window_spec)) \
+                       .withColumn('prev_promo_dialer_consent_yn', lag('promo_dialer_consent_yn').over(window_spec)) \
+                       .withColumn('prev_promo_sms_consent_yn', lag('promo_sms_consent_yn').over(window_spec)) \
+                       .withColumn('prev_servicing_consent_yn', lag('servicing_consent_yn').over(window_spec)) \
+                       .withColumn('prev_servicing_dialer_consent_yn', lag('servicing_dialer_consent_yn').over(window_spec)) \
+                       .withColumn('prev_servicing_sms_consent_yn', lag('servicing_sms_consent_yn').over(window_spec))
+    
+    
+    print('input_df is below1')
+    #input_df.show(20, truncate=False)
+    
+    input_df = input_df.withColumn('is_bad_data', when(
+        (col('prev_promo_consent_yn').isin('Y', 'N') & col('promo_consent_yn').isNull()) |
+        (col('prev_promo_dialer_consent_yn').isin('Y', 'N') & col('promo_dialer_consent_yn').isNull()) |
+        (col('prev_promo_sms_consent_yn').isin('Y', 'N') & col('promo_sms_consent_yn').isNull()) |
+        (col('prev_servicing_consent_yn').isin('Y', 'N') & col('servicing_consent_yn').isNull()) |
+        (col('prev_servicing_dialer_consent_yn').isin('Y', 'N') & col('servicing_dialer_consent_yn').isNull()) |
+        (col('prev_servicing_sms_consent_yn').isin('Y', 'N') & col('servicing_sms_consent_yn').isNull()), True).otherwise(False))
+        
+    print('input_df is below2')
+    #input_df.show(20, truncate=False)
+    
+    # Filter out bad data for clean records
+    clean_df = input_df.filter(~col('is_bad_data'))
+    print('clean_df is below')
+    #clean_df.show(20, truncate=False)
+    
+    # Extract bad data for further analysis
+    bad_data_df = input_df.filter(col('is_bad_data'))
+    print('bad_df is below')
+    #bad_data_df.show(20, truncate=False)
+    
+    # Drop the auxiliary columns used for comparison
+    clean_df = clean_df.drop('prev_promo_consent_yn', 'prev_promo_dialer_consent_yn', 'prev_promo_sms_consent_yn',
+                             'prev_servicing_consent_yn', 'prev_servicing_dialer_consent_yn', 'prev_servicing_sms_consent_yn', 'is_bad_data')
+    
+    # Save bad records to a file (choose any format: parquet, json, csv, text)
+    #bad_data_df.write.mode('overwrite').parquet('/path/to/bad_data.parquet') # Or .json, .csv, .text
+    
+    # Drop unnecessary columns from bad_data_df
+    bad_data_df = bad_data_df.drop('prev_promo_consent_yn', 'prev_promo_dialer_consent_yn', 'prev_promo_sms_consent_yn',
+                                   'prev_servicing_consent_yn', 'prev_servicing_dialer_consent_yn', 'prev_servicing_sms_consent_yn', 'is_bad_data')
+    
+    # Show the final valid and invalid records (for testing)
+    print('clean_df is below after drop column')
+    #clean_df.show(20, truncate=False)
+    print('bad_df is below after drop column')
+    #bad_data_df.show(20, truncate=False)
+    
+    bad_df_count = bad_data_df.count()
+    clean_df_count = clean_df.count()
+    total_count = bad_df_count + clean_df_count
+    print(f"Count of bad_data_df rows: {bad_df_count}, Count of clean_df rows: {clean_df_count}, Total count of rows in both DataFrames: {total_count}")
+    
+    #TCPA CODE ENDS HERE
+    
+    input_df = clean_df
+    #df1 = input_df
+    
+    c1 = input_df.count()
+    print("c1", c1)
+
+    input_df = input_df.withColumn("created_by", lit(None).cast("string"))
+    input_df = input_df.withColumn("record_created_ts", lit(None).cast("timestamp"))
+    input_df = input_df.withColumn("update_by", lit(None).cast("string"))
+    input_df = input_df.withColumn("record_update_ts", lit(None).cast(TimestampType()))
+    input_df = input_df.withColumn("expiration_ts", lit(None).cast("timestamp"))
+    input_df = input_df.withColumn("current_yn", lit(None).cast("string"))
+    
+    #wind_spec_1 = Window.partitionBy('phone_no', 'promo_consent_yn', 'promo_consent_ts', 'promo_sms_consent_yn', 'promo_sms_consent_ts', 'promo_dialer_consent_yn', 'promo_dialer_consent_ts', 'servicing_consent_yn', 'servicing_consent_ts', 'servicing_sms_consent_yn', 'servicing_sms_consent_ts', 'servicing_dialer_consent_yn', 'servicing_dialer_consent_ts', 'national_dnc_yn', 'effective_ts').orderBy(desc('update_ts'))
+    #input_df = input_df.withColumn('row_number', row_number().over(wind_spec_1))
+    #input_df = input_df.filter(col('row_number') == 1).drop('row_number')
+    
+    required_columns = ['id', 'phone_no', 'source_channel', 'national_dnc_yn', 'promo_consent_yn', 'promo_consent_ts', 'promo_dialer_consent_yn', 'promo_dialer_consent_ts', 'promo_sms_consent_yn', 'promo_sms_consent_ts', 'servicing_consent_yn', 'servicing_consent_ts', 'servicing_dialer_consent_yn', 'servicing_dialer_consent_ts', 'servicing_sms_consent_yn', 'servicing_sms_consent_ts', 'phone_type', 'contact_status', 'sms_cd', 'ip_address', 'customer_name', 'role_type', 'application_id', 'uai_id', 'campaign_id', 'response_keyword', 'team_member_id', 'source_screen_name', 'customer_account_lookup_id', 'source', 'correlation_id', 'external_update_ts', 'contact_status_update_ts', 'effective_ts', 'update_ts',  'delete_ts','created_by', 'record_created_ts', 'update_by', 'record_update_ts', 'expiration_ts', 'current_yn']
+    
+    input_df = input_df.select(required_columns)
+    
+    c5 = input_df.count()
+    print("c5", c5)
+    
+    print('after select')
+    #input_df.show(5,truncate=False)
+    
+    c6 = input_df.count()
+    print("c6", c6)
+    
+    #df2 = input_df
+    #columns_to_drop = ["created_by", "record_created_ts", "update_by", "record_update_ts", "expiration_ts", "current_yn"]
+    #df2 = df2.drop(*columns_to_drop)
+    
+    input_df_count_without_dup = input_df.count()
+    dup_count = input_df_count_with_dup - input_df_count_without_dup
+    logger.info(f"Total Count in main_df - {input_df_count_with_dup} : Identified Dupes - {dup_count} : Dropping them from source :")
+    logger.info(f"Total record count after dropping dupes : {input_df_count_without_dup}")
+    
+    #difference_df = df1.subtract(df2)
+    # Show the result
+    #print("Here are the duplicates")
+    #difference_df.show(10,truncate=False)
+    
+    print("Displaying the first 20 records of the input DataFrame before Iceberg:")
+    #input_df.show(20, truncate=False)
+    print("Schema of the input DataFrame:")
+ 
+
+    spark = SparkSession.builder \
+    .config(f"spark.sql.catalog.{catalog_nm}", "org.apache.iceberg.spark.SparkCatalog") \
+    .config(f"spark.sql.catalog.{catalog_nm}.warehouse", refined_bucket) \
+    .config(f"spark.sql.catalog.{catalog_nm}.catalog-impl", "org.apache.iceberg.aws.glue.GlueCatalog") \
+    .config(f"spark.sql.catalog.{catalog_nm}.io-impl", "org.apache.iceberg.aws.s3.S3FileIO") \
+    .config("spark.sql.iceberg.handle-timestamp-without-timezone", "true") \
+    .getOrCreate() 
+    logger.info(f"Iceberg Session Creation compeleted")
+    
+    table = f"{catalog_nm}.{database_name}.{table_name}"
+    iceberg_df = spark.read.format("iceberg").load(table).filter(col('current_yn')=='Y')
+    print('iceberg_df and schema')
+    #iceberg_df.show(20,truncate=False)
+    iceberg_df.printSchema()
+    input_df.printSchema()
+    #Audit Table transformation_logic
+    iceberg_df.createOrReplaceTempView('iceberg_tab')
+    input_df.createOrReplaceTempView('input_tab')
+   
+   
+    
+    filtered_iceberg = spark.sql("select * from iceberg_tab where phone_no in (select phone_no from input_tab)")
+    filtered_iceberg.createOrReplaceTempView('filtered_iceberg_tab')
+
+    update_recs = spark.sql("select ip.* from input_tab ip join filtered_iceberg_tab ic  on ip.phone_no = ic.phone_no where date_trunc('second',cast(ip.effective_ts as timestamp)) > cast(ic.effective_ts as timestamp)  ")
+    
+    reject_recs = spark.sql("select ip.* from input_tab ip join filtered_iceberg_tab ic  on ip.phone_no = ic.phone_no where date_trunc('second',cast(ip.effective_ts as timestamp)) <= cast(ic.effective_ts as timestamp)  ")
+    
+    reject_recs_count = reject_recs.count()
+    
+    if reject_recs_count > 0:
+        s3_path = f"s3://{rejectbucket}/communication_consent_history_phone/rejected_data/{file_datetime}/backDatedData"
+        reject_recs.coalesce(1).write.mode("overwrite").json(s3_path)
+        print(f"Data written to {s3_path} in JSON format.")
+    
+    new_recs = spark.sql("select ip.* from input_tab ip where phone_no not in (select phone_no from filtered_iceberg_tab)")
+    new_recs.show(5,False)
+    
+    print("update",update_recs.count())
+    print("new",new_recs.count())
+    
+    new_union = update_recs.union(new_recs)
+    print("new_union",new_union.count())
+    
+ 
+    input_rec_cnt = input_df.count()
+    Update_record_cnt = filtered_iceberg.count()
+    new_record_cnt = input_rec_cnt - Update_record_cnt
+    print('New record Count : ',new_record_cnt)
+    print('Update record Count : ',Update_record_cnt)
+    filtered_iceberg = filtered_iceberg.drop('MONTH_EFFECTIVE_TIMESTAMP','YEAR_EFFECTIVE_TIMESTAMP')
+    df_union = new_union.union(filtered_iceberg)
+
+    print('Union Data : ')
+    #df_union = input_df.union(iceberg_df)
+    #df_union.show(30,truncate=False)
+    
+    
+    #TCPA CODE STARTS HERE
+    
+    # Create a window partitioned by phone_no and ordered by effective_ts
+    window_spec = Window.partitionBy('phone_no').orderBy('effective_ts')
+    
+    # Use lag to track the last valid row for comparison
+    input_df = input_df.withColumn('prev_promo_consent_yn', lag('promo_consent_yn').over(window_spec)) \
+                       .withColumn('prev_promo_dialer_consent_yn', lag('promo_dialer_consent_yn').over(window_spec)) \
+                       .withColumn('prev_promo_sms_consent_yn', lag('promo_sms_consent_yn').over(window_spec)) \
+                       .withColumn('prev_servicing_consent_yn', lag('servicing_consent_yn').over(window_spec)) \
+                       .withColumn('prev_servicing_dialer_consent_yn', lag('servicing_dialer_consent_yn').over(window_spec)) \
+                       .withColumn('prev_servicing_sms_consent_yn', lag('servicing_sms_consent_yn').over(window_spec))
+    
+    
+    print('input_df is below1')
+    #input_df.show(20, truncate=False)
+    
+    input_df = input_df.withColumn('is_bad_data', when(
+        (col('prev_promo_consent_yn').isin('Y', 'N') & col('promo_consent_yn').isNull()) |
+        (col('prev_promo_dialer_consent_yn').isin('Y', 'N') & col('promo_dialer_consent_yn').isNull()) |
+        (col('prev_promo_sms_consent_yn').isin('Y', 'N') & col('promo_sms_consent_yn').isNull()) |
+        (col('prev_servicing_consent_yn').isin('Y', 'N') & col('servicing_consent_yn').isNull()) |
+        (col('prev_servicing_dialer_consent_yn').isin('Y', 'N') & col('servicing_dialer_consent_yn').isNull()) |
+        (col('prev_servicing_sms_consent_yn').isin('Y', 'N') & col('servicing_sms_consent_yn').isNull()), True).otherwise(False))
+        
+    print('input_df is below2')
+    #input_df.show(20, truncate=False)
+    
+    # Filter out bad data for clean records
+    clean_df = input_df.filter(~col('is_bad_data'))
+    print('clean_df is below')
+    #clean_df.show(20, truncate=False)
+    
+    # Extract bad data for further analysis
+    bad_data_df_2 = input_df.filter(col('is_bad_data'))
+    print('bad_df is below')
+    #bad_data_df_2.show(20, truncate=False)
+    
+    # Drop the auxiliary columns used for comparison
+    clean_df = clean_df.drop('prev_promo_consent_yn', 'prev_promo_dialer_consent_yn', 'prev_promo_sms_consent_yn',
+                             'prev_servicing_consent_yn', 'prev_servicing_dialer_consent_yn', 'prev_servicing_sms_consent_yn', 'is_bad_data')
+    
+    # Save bad records to a file (choose any format: parquet, json, csv, text)
+    #bad_data_df_2.write.mode('overwrite').parquet('/path/to/bad_data.parquet') # Or .json, .csv, .text
+    
+    # Drop unnecessary columns from bad_data_df_2
+    bad_data_df_2 = bad_data_df_2.drop('prev_promo_consent_yn', 'prev_promo_dialer_consent_yn', 'prev_promo_sms_consent_yn',
+                                   'prev_servicing_consent_yn', 'prev_servicing_dialer_consent_yn', 'prev_servicing_sms_consent_yn', 'is_bad_data')
+    
+    # Show the final valid and invalid records (for testing)
+    print('clean_df is below after drop column')
+    #clean_df.show(20, truncate=False)
+    print('bad_df is below after drop column')
+    #bad_data_df_2.show(20, truncate=False)
+    
+    bad_df_count = bad_data_df_2.count()
+    clean_df_count = clean_df.count()
+    total_count = bad_df_count + clean_df_count
+    print(f"Count of bad_data_df_2 rows: {bad_df_count}, Count of clean_df rows: {clean_df_count}, Total count of rows in both DataFrames: {total_count}")
+    
+    columns_to_drop = ["created_by", "record_created_ts", "update_by", "record_update_ts", "expiration_ts", "current_yn"]
+    bad_data_df_2 = bad_data_df_2.drop(*columns_to_drop)
+    
+    #TCPA CODE ENDS HERE
+    
+    combined_df = bad_data_df.union(bad_data_df_2)
+    combined_df = combined_df.coalesce(1)
+    #combined_df.show(20, truncate=False)
+    
+    combined_count = combined_df.count()
+    bad_data_df_count = bad_data_df.count()
+    bad_data_df_2_count = bad_data_df_2.count()
+    
+    print(f"Count of bad_data_df rows: {bad_data_df_count}, Count of bad_data_df_2 rows: {bad_data_df_2_count}, combined_count of rows in both DataFrames: {combined_count}")
+    
+    if combined_count >= 1:
+        s3_path = f"s3://{rejectbucket}/communication_consent_history_phone/rejected_data/{file_datetime}/tcpa_null_after_yn"
+        combined_df.write.mode("overwrite").json(s3_path)
+        print(f"Data written to {s3_path} in JSON format.")
+        
+    window_spec_fin = Window.partitionBy('phone_no', 'source_channel', 'national_dnc_yn', 'promo_consent_yn', 'promo_dialer_consent_yn', 'promo_sms_consent_yn', 'servicing_consent_yn', 'servicing_dialer_consent_yn', 'servicing_sms_consent_yn', 'phone_type', 'contact_status', 'sms_cd', 'ip_address', 'customer_name', 'role_type', 'application_id', 'uai_id', 'campaign_id', 'response_keyword', 'team_member_id', 'source_screen_name', 'customer_account_lookup_id', 'source', 'correlation_id').orderBy('effective_ts')
+    
+    print('Duplicate : ')
+    
+    #df_union.show(30,truncate=False)
+    
+    df_union = df_union.withColumn("row_number_fin", row_number().over(window_spec_fin))
+    print('Duplicate 1: ')
+    #df_union.show(30,truncate=False)
+    df_union =  df_union.filter(col("row_number_fin") == 1)
+    print('Duplicate21: ')
+    #df_union.show(30,truncate=False)
+    df_chg_indicators = df_union.drop("row_number_fin")
+    print('Duplicate 3: ')
+    #df_chg_indicators.show(30,truncate=False)
+    
+    wind_spec1 = Window.partitionBy('phone_no').orderBy(col('effective_ts')).rowsBetween(Window.unboundedPreceding, Window.currentRow)
+    df_chg_indicators = df_chg_indicators.withColumn('row_num1', row_number().over(wind_spec1))
+    max_rnk_df = df_chg_indicators.groupBy("phone_no").agg(max("row_num1").alias("max_rnk"))
+    
+    df_chg_indicators = df_chg_indicators.join(max_rnk_df, ['phone_no'])
+    
+    input_df = df_chg_indicators
+    
+    @document_it(description="Assign the value of Glue - 'job_run_id' to column 'created_by'")
+    def created_by(input_df):
+        #document_it_begin
+        input_df = input_df.withColumn('created_by', F.lit(job_run_id))
+        return input_df
+        #document_it_end
+    
+    input_df = created_by(input_df)
+    
+    @document_it(description="Assign the value of Glue - 'job_run_id' to column 'update_by'")
+    def update_by(input_df):
+        #document_it_begin
+        input_df = input_df.withColumn('update_by', F.lit(job_run_id))
+        return input_df
+        #document_it_end
+    
+    input_df = update_by(input_df)
+    
+    @document_it(description="Assign the value of file_datetime - current_timestamp to column 'record_created_ts'")
+    def record_created_ts(input_df):
+        #document_it_begin
+        #input_df = input_df.withColumn('record_created_ts', lit(current_ts))
+        input_df = input_df.withColumn('record_created_ts',  date_trunc('second',from_utc_timestamp(lit(current_ts),"CST6CDT")) )
+        return input_df
+        #document_it_end
+    
+    input_df = record_created_ts(input_df)
+
+    @document_it(description="Assign the value of file_datetime - current_timestamp to column 'record_update_ts'")
+    def record_update_ts(input_df):
+        #document_it_begin
+        wind_spec3 = Window.partitionBy('phone_no').orderBy(col('record_created_ts'))
+        input_df = input_df.withColumn('record_update_ts', F.lead('record_created_ts', 1).over(wind_spec3))
+        input_df = input_df.withColumn('record_update_ts',F.when(F.col('record_update_ts').isNull(),col('record_created_ts')).otherwise(col('record_update_ts')))
+
+        return input_df
+        #document_it_end
+    
+    input_df = record_update_ts(input_df)
+    
+    @document_it(description="Determine 'expiration_ts' based on the next 'effective_ts' within each 'phone_no' partition ordered by time")
+    def expiration_ts(input_df):
+        #document_it_begin
+        wind_spec2 = Window.partitionBy('phone_no').orderBy(col('effective_ts'))
+        input_df = input_df.withColumn('expiration_ts', F.lead('effective_ts', 1).over(wind_spec2))
+        return input_df
+        #document_it_end
+
+    input_df = expiration_ts(input_df)
+    
+
+    @document_it(description="Set 'current_yn' to 'Y' if 'row_num1' equals 'max_rnk', otherwise 'N'")
+    def current_yn(input_df):
+        #document_it_begin
+        input_df = input_df.withColumn('current_yn', F.when(F.col('row_num1') == F.col('max_rnk'), 'Y').otherwise('N'))
+        return input_df
+        #document_it_end
+
+    input_df = current_yn(input_df)
+
+    print("Displaying the first 20 records of the input DataFrame after Iceberg:")
+    #input_df.show(20, truncate=False)
+    print("Schema of the input DataFrame:")
+    input_df.printSchema()
+
+    print('target_bucket : ',transformed_bucket)
+    print('target_prefix : ',target_prefix)
+    
+    def convert_timestamp_columns_seconds(input_df, columns, format):
+        for column in columns:
+            #input_df = input_df.withColumn(column, from_utc_timestamp(column,"CST6CDT"))
+             input_df.withColumn(column, date_trunc('second',col(column)))
+        return input_df
+
+    input_df = convert_timestamp_columns_seconds(input_df, timestamp_columns, timestamp_format)
+    
+    final_df = input_df
+    
+    
+    final_df = final_df.withColumn('update_ts', date_trunc('second',col('update_ts'))).withColumn('effective_ts', date_trunc('second',col('effective_ts'))).withColumn('expiration_ts', date_trunc('second',col('expiration_ts'))).withColumn("expiration_ts",expr("expiration_ts - INTERVAL 1 MILLISECOND"))
+    
+    
+    #final_df.show(5,truncate=False)
+    df_duplicates = final_df.groupBy('phone_no','effective_ts').count()
+    df_duplicates = df_duplicates.filter(col('count')>1).select('*')
+    final_df[final_df['phone_no'].isin(df_duplicates['phone_no'])]
+    
+    final_df = final_df.drop('row_num1', 'max_rnk')
+    
+    print('Duplicate records : ')
+    #df_duplicates.show(20,truncate=False)
+   
+    final_df = final_df.createOrReplaceTempView('tab_custcommpref')
+    final_df = spark.sql("select *,cast(YEAR(effective_ts) as INTEGER)as YEAR_EFFECTIVE_TIMESTAMP, cast(MONTH(effective_ts) as INTEGER) as MONTH_EFFECTIVE_TIMESTAMP from tab_custcommpref")
+    
+    final_df.coalesce(1).write.format("parquet").option("header","true").option("quote","\"").option("escape","\"").mode("overwrite").save(build_uri_from_bucket_and_key(transformed_bucket, target_prefix).replace("s3://", "s3a://")+"/")
+    
+    transformation_json = json.dumps(transformation_details, indent=4)
+    json_file_path = os.path.join(manifest_prefix, "phone_cust_comm_preference_manifest.json")
+    print('json_file_path : ',json_file_path)
+
+    # Save the JSON to S3
+    s3_client.put_object(
+        Body=transformation_json,
+        Bucket=manifest_bucket,
+        Key=json_file_path
+    )
+    
+    print(f"Transformation details JSON written to s3://{manifest_bucket}/{json_file_path}")
+    
+    dynamodb = boto3.resource('dynamodb')
+    table = dynamodb.Table(Input_param_dynamodb)
+    primary_key = {'pipeline':'communication_consent_history_phone'}
+    table.update_item(Key=primary_key,UpdateExpression=f'SET New_records_cnt = :val,Update_records_cnt = :val1 ',ExpressionAttributeValues={':val':new_record_cnt,':val1':Update_record_cnt})
+    
+    logger.info(f"Tagging S3 objects ")
+    tags = []
+    for tag_string in tags_to_set.split(','):
+        key, value = tag_string.strip().split(':')
+        tags.append({'Key': key.strip(), 'Value': value.strip()})
+    logger.info(f"tags : {tags}")
+
+    response = s3_client.list_objects_v2(Bucket = transformed_bucket, Prefix = target_prefix+'/')
+    #print(f"bucket response : {response}")
+    
+    files = [obj['Key'] for obj in response.get('Contents', []) if not obj['Key'].endswith('/')]
+    #print(f"files : {files}")
+
+    for file in files:
+        response = s3_client.put_object_tagging(
+            Bucket = transformed_bucket,
+            Key = file,
+            Tagging = {
+                'TagSet': tags
+            }
+        )
+    logger.info(f"Tagging compelted")
+  
+job.commit()
