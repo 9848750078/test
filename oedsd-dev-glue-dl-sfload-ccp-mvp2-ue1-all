@@ -1,0 +1,129 @@
+import sys
+import boto3
+from awsglue.utils import getResolvedOptions
+from awsglue.context import GlueContext
+from pyspark.context import SparkContext
+
+# Default values for missing arguments
+default_args = {
+    "S3_INPUT_PATH": "s3://lakeformation-bp-test/snowflake_ddl_results/",
+    "DATABASE_NAME": "default_db",
+    "TABLE_NAME": "default_table"
+}
+
+# Get Glue job parameters, with fallback to defaults
+try:
+    args = getResolvedOptions(sys.argv, ["JOB_NAME", "S3_INPUT_PATH", "DATABASE_NAME", "TABLE_NAME"])
+except Exception as e:
+    print(f"Warning: Missing Glue job parameters. Using defaults. {str(e)}")
+    args = default_args  # Fallback to default values
+
+# Assign arguments
+JOB_NAME = args.get("JOB_NAME", "default_glue_job")
+S3_INPUT_PATH = args["S3_INPUT_PATH"]
+DATABASE_NAME = args["DATABASE_NAME"]
+TABLE_NAME = args["TABLE_NAME"]
+
+# Extract bucket name and prefix from S3 path
+bucket_name = S3_INPUT_PATH.replace("s3://", "").split("/")[0]
+folder_prefix = "/".join(S3_INPUT_PATH.replace("s3://", "").split("/")[1:])  # Extract prefix
+
+# Initialize Glue and Spark Context
+sc = SparkContext()
+glueContext = GlueContext(sc)
+logger = glueContext.get_logger()
+
+logger.info(f"Using S3 path: {S3_INPUT_PATH}, Database: {DATABASE_NAME}, Table: {TABLE_NAME}")
+
+# Initialize AWS Clients
+s3_client = boto3.client("s3")
+lakeformation_client = boto3.client("lakeformation")
+
+# Test Lake Formation connection by listing tags (basic API call)
+try:
+    response = lakeformation_client.list_resources()
+    logger.info("Successfully connected to Lake Formation.")
+    print("Lake Formation Connection Test: Success")
+except Exception as e:
+    logger.error(f"Error connecting to Lake Formation: {str(e)}")
+    print(f"Lake Formation Connection Test: Failed: {str(e)}")
+    sys.exit(1)
+
+# List all files in the S3 directory
+response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=folder_prefix)
+files = [obj['Key'] for obj in response.get('Contents', [])] if 'Contents' in response else []
+
+if not files:
+    logger.warning(f"No files found in S3 path: {S3_INPUT_PATH}")
+    print("No files found in S3 path.")
+    sys.exit(0)  # Exit if no files found
+
+logger.info(f"Files found: {files}")
+print(f"Files found: {files}")
+
+# Dictionary to store unique column tags
+columns_to_tag_dict = {}
+
+# Process each file
+for file_key in files:
+    logger.info(f"Processing file: {file_key}")
+    print(f"Processing file: {file_key}")
+
+    # Fetch the file content from S3
+    try:
+        file_content = s3_client.get_object(Bucket=bucket_name, Key=file_key)['Body'].read().decode('utf-8')
+    except Exception as e:
+        logger.error(f"Error reading file {file_key}: {str(e)}")
+        print(f"Error reading file {file_key}: {str(e)}")
+        continue
+
+    # Extract column masking policies
+    lines = file_content.splitlines()
+
+    for line in lines:
+        if "WITH MASKING POLICY" in line:
+            parts = line.split("WITH MASKING POLICY")
+            print("85_parts:",parts)
+            column_name = parts[0].strip().split()[0]  # Extract column name
+            print("87_column_name:",column_name)
+            masking_policy = parts[1].strip().split("COMMENT")[0].strip()
+            print("89_masking_policy:",masking_policy)
+
+            # Determine sensitivity based on policy name
+            sensitivity = "NON_SENSITIVE" if "_NPII_" in masking_policy else "SENSITIVE" if "_SPII_" in masking_policy else None
+            print("94_sensitivity:",sensitivity)
+            
+            if sensitivity:
+                columns_to_tag_dict[column_name] = sensitivity
+
+# Debug print for extracted columns
+logger.info(f"Extracted columns to tag: {columns_to_tag_dict}")
+print(f"97_Extracted_columns_to_tag: {columns_to_tag_dict}")
+
+# Apply tags to Lake Formation in bulk using the correct method
+if columns_to_tag_dict:
+    for column_name, sensitivity in columns_to_tag_dict.items():
+        try:
+            lakeformation_client.add_lf_tags_to_resource(
+                Resource={
+                    "TableWithColumns": {
+                        "DatabaseName": DATABASE_NAME,
+                        "Name": TABLE_NAME,
+                        "ColumnNames": [column_name],
+                    }
+                },
+                LFTags=[
+                    {
+                        "TagKey": "Sensitivity",
+                        "TagValues": [sensitivity],
+                    }
+                ],
+            )
+            logger.info(f"Tagged column: {column_name} as {sensitivity}")
+            print(f"Tagged column: {column_name} as {sensitivity}")
+        except Exception as e:
+            logger.error(f"Error tagging column {column_name}: {str(e)}")
+            print(f"Error tagging column {column_name}: {str(e)}")
+
+logger.info("Glue job completed successfully.")
+print("Glue job completed successfully.")
